@@ -6,6 +6,7 @@ import { firebaseDb } from '../lib/firebaseDb';
 import { auth } from '../lib/firebase';
 import { GoogleGenAI, LiveServerMessage, Modality, Type as GenAIType } from '@google/genai';
 import { AudioStreamPlayer, AudioRecorder } from '../lib/liveMedia';
+import { LiveConnectionManager } from '../lib/connectionManager';
 
 interface TranscriptEntry {
   speaker: string;
@@ -278,7 +279,7 @@ Do NOT write any bracketed descriptions, scene setups, narrator voice overs, spe
   const isMutedRef = useRef(isMuted);
 
   // Active AI connections
-  const aiConnectionsRef = useRef<Map<string, any>>(new Map());
+  const aiConnectionsRef = useRef<Map<string, LiveConnectionManager>>(new Map());
 
   useEffect(() => {
     isMutedRef.current = isMuted;
@@ -321,10 +322,13 @@ Do NOT write any bracketed descriptions, scene setups, narrator voice overs, spe
         recorderRef.current = new AudioRecorder();
         recorderRef.current.start((base64Data) => {
           if (!isMutedRef.current) {
-            aiConnectionsRef.current.forEach(conn => {
-              (conn as any).sendRealtimeInput?.({
-                audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
-              });
+            aiConnectionsRef.current.forEach(manager => {
+              const session = manager.getSession();
+              if (session && typeof session.sendRealtimeInput === 'function') {
+                session.sendRealtimeInput({
+                  audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+                });
+              }
             });
           }
         }).catch(err => {
@@ -337,7 +341,11 @@ Do NOT write any bracketed descriptions, scene setups, narrator voice overs, spe
 
     // 3. Connect Primary AI session if target was AI
     if (isAI && callState === 'connected' && !aiRef.current) {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+         setAiCaption("Error: Missing GEMINI_API_KEY environment variable");
+         return;
+      }
       // Remove local player/recorder re-init here as it's shared now
       
       const p = participants.find(part => part.personaDescription);
@@ -363,14 +371,12 @@ ${p?.personaDescription || "You are a helpful phone assistant."}
              try {
                 const voiceName = getValidVoiceName(p.voice);
 
-                const session = await ai.live.connect({
-                 model: "gemini-3.1-flash-live-preview",
-                 callbacks: {
+                
+                const callbacks = {
                    onopen: async () => {
                      sessionStarted = true;
-                     setAiCaption("Connected. AI is listening...");
                    },
-                                     onmessage: (msg: LiveServerMessage) => {
+                   onmessage: (msg: LiveServerMessage) => {
                      if (msg.serverContent?.interrupted) {
                        playerRef.current?.stop();
                        playerRef.current = new AudioStreamPlayer(); 
@@ -381,16 +387,16 @@ ${p?.personaDescription || "You are a helpful phone assistant."}
                            const args = call.args as any;
                            const env = args.environment;
                            const AMBIENT_SOUNDS: Record<string, string> = {
-                              driving: "https://actions.google.com/sounds/v1/transportation/driving_in_car.ogg",
-                              cafe: "https://actions.google.com/sounds/v1/crowds/restaurant_chatter.ogg",
-                              street: "https://actions.google.com/sounds/v1/crowds/city_street_traffic.ogg",
-                              rain: "https://actions.google.com/sounds/v1/weather/rain_on_roof.ogg",
-                              nature: "https://actions.google.com/sounds/v1/ambiences/forest_morning.ogg",
-                              office: "https://actions.google.com/sounds/v1/office/typing_on_keyboard.ogg",
-                              train: "https://actions.google.com/sounds/v1/transportation/train_pass_by.ogg",
-                              eating: "https://actions.google.com/sounds/v1/crowds/dining_room_chatter.ogg",
-                              gym: "https://actions.google.com/sounds/v1/crowds/fitness_center_crowd.ogg",
-                              walking: "https://actions.google.com/sounds/v1/crowds/walking_on_gravel.ogg"
+                               driving: "https://actions.google.com/sounds/v1/transportation/driving_in_car.ogg",
+                               cafe: "https://actions.google.com/sounds/v1/crowds/restaurant_chatter.ogg",
+                               street: "https://actions.google.com/sounds/v1/crowds/city_street_traffic.ogg",
+                               rain: "https://actions.google.com/sounds/v1/weather/rain_on_roof.ogg",
+                               nature: "https://actions.google.com/sounds/v1/ambiences/forest_morning.ogg",
+                               office: "https://actions.google.com/sounds/v1/office/typing_on_keyboard.ogg",
+                               train: "https://actions.google.com/sounds/v1/transportation/train_pass_by.ogg",
+                               eating: "https://actions.google.com/sounds/v1/crowds/dining_room_chatter.ogg",
+                               gym: "https://actions.google.com/sounds/v1/crowds/fitness_center_crowd.ogg",
+                               walking: "https://actions.google.com/sounds/v1/crowds/walking_on_gravel.ogg"
                            };
                            if (env && AMBIENT_SOUNDS[env]) {
                              setAmbientUrl(AMBIENT_SOUNDS[env]);
@@ -411,7 +417,10 @@ ${p?.personaDescription || "You are a helpful phone assistant."}
                            response: { result: "Unknown function." }
                          };
                        });
-                       session.sendToolResponse({ functionResponses: responses });
+                       const session = aiConnectionsRef.current.get(p.id!)?.getSession();
+                       if (session && typeof session.sendToolResponse === 'function') {
+                         session.sendToolResponse({ functionResponses: responses });
+                       }
                      }
                      const parts = msg.serverContent?.modelTurn?.parts;
                      if (parts) {
@@ -422,10 +431,10 @@ ${p?.personaDescription || "You are a helpful phone assistant."}
                            playerRef.current?.playPiece(audioPutt);
                            
                            // Pipe to other AIs
-                           Array.from(aiConnectionsRef.current.entries()).forEach(([id, conn]) => {
-                             if (id !== (p as any).id && conn && !isMutedRef.current) {
-                                const c = conn as any;
-                                if (typeof c.sendRealtimeInput === 'function') {
+                           Array.from(aiConnectionsRef.current.entries()).forEach(([id, manager]) => {
+                             if (id !== (p as any).id && manager && !isMutedRef.current) {
+                                const c = manager.getSession();
+                                if (c && typeof c.sendRealtimeInput === 'function') {
                                   c.sendRealtimeInput({
                                     audio: { data: audioPutt, mimeType: 'audio/pcm;rate=24000' }
                                   });
@@ -446,16 +455,10 @@ ${p?.personaDescription || "You are a helpful phone assistant."}
                          }]);
                        }
                      }
-                   },
-                   onerror: (e: any) => {
-                     console.error(e);
-                     setAiCaption("Connection error.");
-                   },
-                   onclose: () => {
-                     setAiCaption("Connection closed.");
                    }
-                 },
-                 config: {
+                };
+
+                const config = {
                    tools: LIVE_API_TOOLS,
                    responseModalities: [Modality.AUDIO],
                    systemInstruction: personaDesc,
@@ -464,12 +467,21 @@ ${p?.personaDescription || "You are a helpful phone assistant."}
                    },
                    inputAudioTranscription: {},
                    outputAudioTranscription: {},
-                 }
-               });
-               
-               // Save primary session
-               aiRef.current = session;
-               aiConnectionsRef.current.set(p.id!, session);
+                };
+                
+                const manager = new LiveConnectionManager(
+                  apiKey,
+                  config as any,
+                  callbacks,
+                  (state, msg) => {
+                    if (msg) setAiCaption(msg);
+                  }
+                );
+                
+                // Save primary session
+                aiRef.current = manager as any;
+                aiConnectionsRef.current.set(p.id!, manager);
+                await manager.connect();
 
              } catch(e) {
                console.error("LiveConnect err", e);
@@ -484,9 +496,9 @@ ${p?.personaDescription || "You are a helpful phone assistant."}
       recorderRef.current?.stop();
       playerRef.current?.stop();
       // Close all AI connections
-      aiConnectionsRef.current.forEach(session => {
+      aiConnectionsRef.current.forEach(manager => {
         try {
-          (session as any).close?.();
+          manager.disconnect();
         } catch (err) {
           console.warn("Error closing AI session", err);
         }
@@ -530,7 +542,11 @@ ${p?.personaDescription || "You are a helpful phone assistant."}
           }
         }).catch(err => console.warn("Conference AI recorder start failed", err));
       }
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+         setAiCaption("Error: Missing GEMINI_API_KEY environment variable");
+         return;
+      }
       const globalPrompt = (profile?.globalPromptEnabled && profile?.globalPrompt) ? `${profile.globalPrompt}\n\n` : '';
       const phoneContext = `[CRITICAL INSTRUCTIONS FOR AI]
 You are residing on the user's mobile phone as a live participant on a call. 
@@ -548,102 +564,115 @@ ${aiContact.personaDescription}
       
       const voiceName = getValidVoiceName(aiContact.voice);
       
-      const session = await ai.live.connect({
-        model: "gemini-3.1-flash-live-preview",
-        config: {
-          tools: LIVE_API_TOOLS,
-          responseModalities: [Modality.AUDIO],
-          systemInstruction: personaDesc,
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName } },
-          },
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-        },
-        callbacks: {
-           onmessage: (msg: LiveServerMessage) => {
-             if (msg.serverContent?.interrupted) {
-               playerRef.current?.stop();
-               playerRef.current = new AudioStreamPlayer(); 
-             }
-             if (msg.toolCall && msg.toolCall.functionCalls) {
-               const responses = msg.toolCall.functionCalls.map(call => {
-                 if (call.name === "set_background_environment") {
-                   const args = call.args as any;
-                   const env = args.environment;
-                   const AMBIENT_SOUNDS: Record<string, string> = {
-                      driving: "https://actions.google.com/sounds/v1/transportation/driving_in_car.ogg",
-                      cafe: "https://actions.google.com/sounds/v1/crowds/restaurant_chatter.ogg",
-                      street: "https://actions.google.com/sounds/v1/crowds/city_street_traffic.ogg",
-                      rain: "https://actions.google.com/sounds/v1/weather/rain_on_roof.ogg",
-                      nature: "https://actions.google.com/sounds/v1/ambiences/forest_morning.ogg",
-                      office: "https://actions.google.com/sounds/v1/office/typing_on_keyboard.ogg",
-                      train: "https://actions.google.com/sounds/v1/transportation/train_pass_by.ogg",
-                      eating: "https://actions.google.com/sounds/v1/crowds/dining_room_chatter.ogg",
-                      gym: "https://actions.google.com/sounds/v1/crowds/fitness_center_crowd.ogg",
-                      walking: "https://actions.google.com/sounds/v1/crowds/walking_on_gravel.ogg"
-                   };
-                   if (env && AMBIENT_SOUNDS[env]) {
-                     setAmbientUrl(AMBIENT_SOUNDS[env]);
-                     setAiCaption(`[Background changed to: ${env}]`);
-                   } else {
-                     setAmbientUrl(null);
-                     setAiCaption(`[Background disabled]`);
-                   }
-                   return {
-                     id: call.id,
-                     name: call.name,
-                     response: { result: "Environment updated." }
-                   };
+      
+            const callbacks = {
+               onmessage: (msg: LiveServerMessage) => {
+                 if (msg.serverContent?.interrupted) {
+                   playerRef.current?.stop();
+                   playerRef.current = new AudioStreamPlayer(); 
                  }
-                 return {
-                   id: call.id,
-                   name: call.name,
-                   response: { result: "Unknown function." }
-                 };
-               });
-               session.sendToolResponse({ functionResponses: responses });
-             }
-             const parts = msg.serverContent?.modelTurn?.parts;
-             if (parts) {
-               let textAcc = "";
-               for (const part of parts) {
-                 if (part.inlineData && part.inlineData.data) {
-                   const audioPutt = part.inlineData.data;
-                   playerRef.current?.playPiece(audioPutt);
-                   
-                   // To make AIs talk to each other, pipe this audio output into other AIs inputs
-                   Array.from(aiConnectionsRef.current.entries()).forEach(([id, conn]) => {
-                     if (id !== aiContact.id && conn && !isMutedRef.current) {
-                        const c = conn as any;
-                        if (typeof c.sendRealtimeInput === 'function') {
-                          c.sendRealtimeInput({
-                            audio: { data: audioPutt, mimeType: 'audio/pcm;rate=24000' } // Output is 24khz
-                          });
-                        }
+                 if (msg.toolCall && msg.toolCall.functionCalls) {
+                   const responses = msg.toolCall.functionCalls.map(call => {
+                     if (call.name === "set_background_environment") {
+                       const args = call.args as any;
+                       const env = args.environment;
+                       const AMBIENT_SOUNDS: Record<string, string> = {
+                           driving: "https://actions.google.com/sounds/v1/transportation/driving_in_car.ogg",
+                           cafe: "https://actions.google.com/sounds/v1/crowds/restaurant_chatter.ogg",
+                           street: "https://actions.google.com/sounds/v1/crowds/city_street_traffic.ogg",
+                           rain: "https://actions.google.com/sounds/v1/weather/rain_on_roof.ogg",
+                           nature: "https://actions.google.com/sounds/v1/ambiences/forest_morning.ogg",
+                           office: "https://actions.google.com/sounds/v1/office/typing_on_keyboard.ogg",
+                           train: "https://actions.google.com/sounds/v1/transportation/train_pass_by.ogg",
+                           eating: "https://actions.google.com/sounds/v1/crowds/dining_room_chatter.ogg",
+                           gym: "https://actions.google.com/sounds/v1/crowds/fitness_center_crowd.ogg",
+                           walking: "https://actions.google.com/sounds/v1/crowds/walking_on_gravel.ogg"
+                       };
+                       if (env && AMBIENT_SOUNDS[env]) {
+                         setAmbientUrl(AMBIENT_SOUNDS[env]);
+                         setAiCaption(`[Background changed to: ${env}]`);
+                       } else {
+                         setAmbientUrl(null);
+                         setAiCaption(`[Background disabled]`);
+                       }
+                       return {
+                         id: call.id,
+                         name: call.name,
+                         response: { result: "Environment updated." }
+                       };
                      }
+                     return {
+                       id: call.id,
+                       name: call.name,
+                       response: { result: "Unknown function." }
+                     };
                    });
+                   const session = aiConnectionsRef.current.get(aiContact.id!)?.getSession();
+                   if (session && typeof session.sendToolResponse === 'function') {
+                     session.sendToolResponse({ functionResponses: responses });
+                   }
                  }
-                 if (part.text) {
-                   textAcc += part.text;
+                 const parts = msg.serverContent?.modelTurn?.parts;
+                 if (parts) {
+                   let textAcc = "";
+                   for (const part of parts) {
+                     if (part.inlineData && part.inlineData.data) {
+                       const audioPutt = part.inlineData.data;
+                       playerRef.current?.playPiece(audioPutt);
+                       
+                       // Pipe to other AIs
+                       Array.from(aiConnectionsRef.current.entries()).forEach(([id, manager]) => {
+                         if (id !== aiContact.id && manager && !isMutedRef.current) {
+                            const c = manager.getSession();
+                            if (c && typeof c.sendRealtimeInput === 'function') {
+                              c.sendRealtimeInput({
+                                audio: { data: audioPutt, mimeType: 'audio/pcm;rate=24000' }
+                              });
+                            }
+                         }
+                       });
+                     }
+                     if (part.text) {
+                       textAcc += part.text;
+                     }
+                   }
+                   if (textAcc) {
+                     setTranscript(prev => [...prev, {
+                       speaker: aiContact.name,
+                       text: textAcc,
+                       timestamp: Date.now()
+                     }]);
+                   }
                  }
                }
-               if (textAcc) {
-                 setAiCaption(`${aiContact.name}: ${textAcc}`);
-                 setTranscript(prev => [...prev, {
-                   speaker: aiContact.name,
-                   text: textAcc,
-                   timestamp: Date.now()
-                 }]);
-               }
-             }
-           }
-        }
-      });
-      aiConnectionsRef.current.set(aiContact.id, session);
+            };
+            
+            const config = {
+               tools: LIVE_API_TOOLS,
+               responseModalities: [Modality.AUDIO],
+               systemInstruction: personaDesc,
+               speechConfig: {
+                 voiceConfig: { prebuiltVoiceConfig: { voiceName } },
+               },
+               inputAudioTranscription: {},
+               outputAudioTranscription: {},
+            };
+            
+            const manager = new LiveConnectionManager(
+              apiKey,
+              config as any,
+              callbacks,
+              (state, msg) => {
+                // Ignore state changes for secondary participants
+              }
+            );
+            
+            aiConnectionsRef.current.set(aiContact.id, manager);
+            await manager.connect();
+
       
       // Trigger the newly added AI to say hello
-      const c = session as any;
+      const c = manager.getSession() as any;
       if (typeof c.sendClientContent === 'function') {
         c.sendClientContent({
           turns: [{ role: "user", parts: [{ text: "Hello, you've just been added to a group call." }] }],
