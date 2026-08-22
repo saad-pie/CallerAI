@@ -71,10 +71,17 @@ export class LiveConnectionManager {
             if (this.callbacks.onerror) this.callbacks.onerror(e);
             this.handleDisconnect(e);
           },
-          onclose: () => {
-            console.log("[ConnectionManager] Connection Closed");
-            if (this.callbacks.onclose) this.callbacks.onclose();
-            this.handleDisconnect();
+          onclose: (e?: any) => {
+            console.log("[ConnectionManager] Connection Closed", e ? `Code: ${e.code}, Reason: ${e.reason}` : "");
+            if (this.callbacks.onclose) this.callbacks.onclose(e);
+            
+            let errorMessage = "Connection Closed";
+            if (e && e.reason) {
+              errorMessage += `: ${e.reason}`;
+            } else if (e && e.code) {
+              errorMessage += ` (Code ${e.code})`;
+            }
+            this.handleDisconnect(e ? new Error(errorMessage) : undefined);
           }
         }
       });
@@ -95,7 +102,8 @@ export class LiveConnectionManager {
     if (this.retryCount < this.maxRetries) {
       const delay = this.backoffDelays[this.retryCount];
       this.retryCount++;
-      this.updateState('reconnecting', `Connection lost. Retrying in ${delay/1000}s...`);
+      const errMsg = error && error.message ? error.message : "Connection lost";
+      this.updateState('reconnecting', `${errMsg}. Retrying...`);
       setTimeout(() => this.attemptConnection(), delay);
     } else {
       this.updateState('failed', "Connection failed after maximum retries. Please check your network or API key.");
@@ -126,11 +134,16 @@ export class LiveConnectionManager {
     }
   }
 
+  public getState() {
+    return this.state;
+  }
+
   public getSession() {
     return this.currentSession;
   }
 
   public disconnect() {
+    console.log("[ConnectionManager] Disconnect called from client");
     this.isIntentionalClose = true;
     this.stopHeartbeat();
     this.updateState('disconnected', "Disconnected");

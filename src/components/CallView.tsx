@@ -65,7 +65,7 @@ export default function CallView({ target, onEndCall, direction = 'outbound' }: 
       const personaDesc = p?.personaDescription || (target as any).personaDescription || 'A helpful AI persona.';
       const voice = p?.voice || (target as any).voice || 'Aoede';
       
-      const apiKey = process.env.GEMINI_API_KEY;
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
       if (!apiKey) {
         throw new Error("No Gemini API key defined");
       }
@@ -324,7 +324,7 @@ Do NOT write any bracketed descriptions, scene setups, narrator voice overs, spe
           if (!isMutedRef.current) {
             aiConnectionsRef.current.forEach(manager => {
               const session = manager.getSession();
-              if (session && typeof session.sendRealtimeInput === 'function') {
+              if (manager.getState() === 'connected' && session && typeof session.sendRealtimeInput === 'function') {
                 session.sendRealtimeInput({
                   audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
                 });
@@ -332,16 +332,15 @@ Do NOT write any bracketed descriptions, scene setups, narrator voice overs, spe
             });
           }
         }).catch(err => {
-          console.warn("Audio input creation failed:", err);
-          setMicrophonePermissionError(true);
-          setPermissionErrorMessage(String(err?.message || err));
-        });
+      console.error("Audio start failed:", err);
+      setAiCaption("Microphone access denied or unavailable.");
+    });
       }
     }
 
     // 3. Connect Primary AI session if target was AI
     if (isAI && callState === 'connected' && !aiRef.current) {
-      const apiKey = process.env.GEMINI_API_KEY;
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
       if (!apiKey) {
          setAiCaption("Error: Missing GEMINI_API_KEY environment variable");
          return;
@@ -465,8 +464,8 @@ ${p?.personaDescription || "You are a helpful phone assistant."}
                    speechConfig: {
                      voiceConfig: { prebuiltVoiceConfig: { voiceName } },
                    },
-                   inputAudioTranscription: {},
-                   outputAudioTranscription: {},
+                   
+                   
                 };
                 
                 const manager = new LiveConnectionManager(
@@ -542,7 +541,7 @@ ${p?.personaDescription || "You are a helpful phone assistant."}
           }
         }).catch(err => console.warn("Conference AI recorder start failed", err));
       }
-      const apiKey = process.env.GEMINI_API_KEY;
+      const apiKey = process.env.GEMINI_API_KEY?.trim();
       if (!apiKey) {
          setAiCaption("Error: Missing GEMINI_API_KEY environment variable");
          return;
@@ -654,8 +653,8 @@ ${aiContact.personaDescription}
                speechConfig: {
                  voiceConfig: { prebuiltVoiceConfig: { voiceName } },
                },
-               inputAudioTranscription: {},
-               outputAudioTranscription: {},
+               
+               
             };
             
             const manager = new LiveConnectionManager(
